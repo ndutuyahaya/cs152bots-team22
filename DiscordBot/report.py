@@ -63,7 +63,7 @@ class Report:
             reply += "1. Harassment\n"
             reply += "2. Spam\n"
             reply += "3. Child safety concern\n"
-            reply += "4. Other.\n"
+            reply += "4. Other\n"
             self.state = State.NARROWING_DOWN_GROOMING
             return [reply]
         
@@ -74,7 +74,7 @@ class Report:
                 reply += "1. Suspected grooming\n"
                 reply += "2. Sharing inappropriate images\n"
                 reply += "3. Attempts to meet in person\n"
-                reply += "4. Other."
+                reply += "4. Other"
                 return [reply]
             else:
                 self.state = State.REPORT_COMPLETE
