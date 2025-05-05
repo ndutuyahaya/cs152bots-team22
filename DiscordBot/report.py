@@ -7,6 +7,11 @@ class State(Enum):
     AWAITING_MESSAGE = auto()
     MESSAGE_IDENTIFIED = auto()
     REPORT_COMPLETE = auto()
+    NARROWING_DOWN_GROOMING = auto()
+    ADDITIONAL_INFO = auto()
+    POTENTIALLY_MORE_INFO = auto()
+    BLOCK = auto()
+    FINISH_REPORT = auto()
 
 class Report:
     START_KEYWORD = "report"
@@ -27,7 +32,7 @@ class Report:
 
         if message.content == self.CANCEL_KEYWORD:
             self.state = State.REPORT_COMPLETE
-            return ["Report cancelled."]
+            return ["Report complete."]
         
         if self.state == State.REPORT_START:
             reply =  "Thank you for starting the reporting process. "
@@ -53,13 +58,56 @@ class Report:
             except discord.errors.NotFound:
                 return ["It seems this message was deleted or never existed. Please try again or say `cancel` to cancel."]
 
-            # Here we've found the message - it's up to you to decide what to do next!
-            self.state = State.MESSAGE_IDENTIFIED
-            return ["I found this message:", "```" + message.author.name + ": " + message.content + "```", \
-                    "This is all I know how to do right now - it's up to you to build out the rest of my reporting flow!"]
+            reply = "I found this message:" + "```" + message.author.name + ": " + message.content + "```\n"
+            reply += "What would you like to report? Enter the number of the option you want to select.\n"
+            reply += "1. Harassment\n"
+            reply += "2. Spam\n"
+            reply += "3. Child safety concern\n"
+            reply += "4. Other.\n"
+            self.state = State.NARROWING_DOWN_GROOMING
+            return [reply]
         
-        if self.state == State.MESSAGE_IDENTIFIED:
-            return ["<insert rest of reporting flow here>"]
+        if self.state == State.NARROWING_DOWN_GROOMING:
+            if "3" in message.content:
+                self.state = State.ADDITIONAL_INFO
+                reply = "What kind of child safety concern? Enter the number of the option you want to select.\n"
+                reply += "1. Suspected grooming\n"
+                reply += "2. Sharing inappropriate images\n"
+                reply += "3. Attempts to meet in person\n"
+                reply += "4. Other."
+                return [reply]
+            else:
+                self.state = State.REPORT_COMPLETE
+                return ["We have not yet built support for options 1, 2, and 4."]
+            
+        if self.state == State.ADDITIONAL_INFO:
+            self.state = State.POTENTIALLY_MORE_INFO
+            reply = "Can you tell us more about what happened? Enter the number of the option you want to select.\n"
+            reply += "1. They are impersonating someone else's identity.\n"
+            reply += "2. They tried to isolate me from others.\n"
+            reply += "3. They asked for private conversations off this app.\n"
+            reply += "4. They pressured me for sensitive photos.\n"
+            reply += "5. They tried to meet up in person.\n"
+            reply += "6. Other"
+            return [reply]
+        
+        if self.state == State.POTENTIALLY_MORE_INFO:
+            reply = "Is there any additional information you would like to provide? If not, say `no`."
+            self.state = State.BLOCK
+            return [reply]
+        
+        if self.state == State.BLOCK:
+            reply = "Would you like to block this user now? Enter 'yes' or 'no'."
+            self.state = State.FINISH_REPORT
+            return [reply]
+        
+        if self.state == State.FINISH_REPORT:  
+            reply = ""
+            if message.content.lower().strip() == "yes":
+                reply = "You have blocked this user.\n\n"       
+            reply += "Thank you for your report. We will review it and take appropriate action. No further information is requested from you at this time."
+            self.state = State.REPORT_COMPLETE
+            return [reply]
 
         return []
 
