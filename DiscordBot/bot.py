@@ -331,7 +331,10 @@ class ModBot(discord.Client):
         
         # Searching for messages with keywords
         try:
-            messages = await text_channel.history(limit=100).flatten()
+            messages = []
+            async for msg in text_channel.history(limit=100, around=message):
+                messages.append(msg)
+
             matching_messages = []
             
             for msg in messages:
@@ -426,13 +429,14 @@ class ModBot(discord.Client):
                 await channel.send("Cannot find the reported user in the guild.")
                 return
             
-            # Confirming before banning
+            moderator = channel.last_message.author
+        
             confirm_msg = await channel.send(f"Are you sure you want to ban {member.name}? React with ✅ to confirm or ❌ to cancel.")
             await confirm_msg.add_reaction("✅")
             await confirm_msg.add_reaction("❌")
             
             def check(reaction, user):
-                return user == channel.last_message.author and str(reaction.emoji) in ["✅", "❌"] and reaction.message.id == confirm_msg.id
+                return user == moderator and str(reaction.emoji) in ["✅", "❌"] and reaction.message.id == confirm_msg.id
             
             try:
                 reaction, user = await self.wait_for('reaction_add', timeout=60.0, check=check)
@@ -462,13 +466,12 @@ class ModBot(discord.Client):
                 await channel.send("Cannot find the reported user in the guild.")
                 return
             
-            # This is For Discord servers with timeout support
-            until = datetime.now() + timedelta(days=days)
+            until = discord.utils.utcnow() + timedelta(days=days)
             await member.timeout(until, reason=f"Timed out for {report.reason}")
             
             report.status = "completed"
             report.mod_actions.append(ModAction.SUSPEND_ACCOUNT)
-            await channel.send(f"User {member.name} has been suspended for {days} days (until {until.strftime('%Y-%m-%d %H:%M')}).")
+            await channel.send(f"User {member.name} has been suspended for {days} days (until {until.strftime('%Y-%m-%d %H:%M UTC')}).")
         except Exception as e:
             await channel.send(f"Error suspending user: {str(e)}")
 
@@ -485,15 +488,14 @@ class ModBot(discord.Client):
 
 
     async def report_to_law(self, channel, report):
-        """This will simulate Simulate reporting to law enforcement. 
-        Since this is not integrated with any real system, we'll just mark the report and notify """
-        
+        """Simulate reporting to law enforcement"""
+        moderator = channel.last_message.author
         confirm_msg = await channel.send(f"Are you sure you want to report this to law enforcement? React with ✅ to confirm or ❌ to cancel.")
         await confirm_msg.add_reaction("✅")
         await confirm_msg.add_reaction("❌")
         
         def check(reaction, user):
-            return user == channel.last_message.author and str(reaction.emoji) in ["✅", "❌"] and reaction.message.id == confirm_msg.id
+            return user == moderator and str(reaction.emoji) in ["✅", "❌"] and reaction.message.id == confirm_msg.id
         
         try:
             reaction, user = await self.wait_for('reaction_add', timeout=60.0, check=check)
