@@ -11,8 +11,12 @@ from datetime import datetime
 from sklearn.metrics import accuracy_score
 import os
 import csv
+import torch
 
-DATASET_SIZE = 100
+DATASET_SIZE = 4000
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
 
 # === File path ===
 train_data_path = "data/train/grooming_train_dataset.csv"
@@ -49,6 +53,7 @@ val_dataset.set_format("torch")
 
 # === Model ===
 model = AutoModelForSequenceClassification.from_pretrained("distilbert-base-uncased", num_labels=2)
+model.to(device)
 
 # === Metrics ===
 accuracy = evaluate.load("accuracy")
@@ -65,7 +70,7 @@ def compute_metrics(eval_pred):
 # === Timestamped output directory ===
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 save_dir = f"models/grooming-detector-{timestamp}"
-metrics_file = f"{save_dir}/metrics.csv"
+metrics_file = f"{save_dir}/training_metrics.csv"
 os.makedirs(save_dir, exist_ok=True)
 
 # === Training Args ===
