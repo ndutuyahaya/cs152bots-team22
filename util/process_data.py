@@ -1,9 +1,13 @@
 import xml.etree.ElementTree as ET
 import pandas as pd
 
-predator_ids_file_path = "../data/train/pan12-sexual-predator-identification-training-corpus-predators-2012-05-01.txt"
-conversations_file_path = "../data/train/pan12-sexual-predator-identification-training-corpus-2012-05-01.xml"
-output_file_path = "../data/train/grooming_train_dataset.csv"
+# predator_ids_file_path = "../data/train/pan12-sexual-predator-identification-training-corpus-predators-2012-05-01.txt"
+# conversations_file_path = "../data/train/pan12-sexual-predator-identification-training-corpus-2012-05-01.xml"
+# output_file_path = "../data/train/grooming_train_dataset.csv"
+
+predator_ids_file_path = "../data/test/pan12-sexual-predator-identification-groundtruth-problem1.txt"
+conversations_file_path = "../data/test/pan12-sexual-predator-identification-test-corpus-2012-05-17.xml"
+output_file_path = "../data/test/grooming_test_dataset.csv"
 
 with open(predator_ids_file_path, "r") as f:
     predator_ids = set(line.strip() for line in f if line.strip())
