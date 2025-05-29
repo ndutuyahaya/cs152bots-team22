@@ -4,3 +4,5 @@ TABot/tokens.json
 data
 .DS_Store
 models
+DiscordBot/debug_model_loading.py
+DiscordBot/test_classifier_standalone.py

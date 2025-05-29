@@ -16,3 +16,6 @@ dependencies:
       - datasets
       - transformers
       - evaluate
+      - torch
+      - discord.py
+      - asyncio

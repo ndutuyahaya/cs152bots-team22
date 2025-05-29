@@ -10,20 +10,26 @@ from report import Report
 import asyncio
 from datetime import datetime, timedelta
 from enum import Enum, auto
+import csv
 
-# Set up logging to the console
+try:
+    from classifier import GroomingClassifier, ConversationBuffer, UserRiskProfile
+    ML_AVAILABLE = True
+except ImportError as e:
+    print(f"ML components not available: {e}")
+    ML_AVAILABLE = False
+
 logger = logging.getLogger('discord')
 logger.setLevel(logging.DEBUG)
 handler = logging.FileHandler(filename='discord.log', encoding='utf-8', mode='w')
 handler.setFormatter(logging.Formatter('%(asctime)s:%(levelname)s:%(name)s: %(message)s'))
 logger.addHandler(handler)
 
-# There should be a file called 'tokens.json' inside the same folder as this file
+
 token_path = 'tokens.json'
 if not os.path.isfile(token_path):
     raise Exception(f"{token_path} not found!")
 with open(token_path) as f:
-    # If you get an error here, it means your token is formatted incorrectly. Did you put it in quotes?
     tokens = json.load(f)
     discord_token = tokens['discord']
 
@@ -38,13 +44,14 @@ class ModAction(Enum):
 
 
 class ModReport:
-    def __init__(self, reporter_id, reported_user_id, message, reason, details, score=50):
+    def __init__(self, reporter_id, reported_user_id, message, reason, details, score=50, ml_prediction=None):
         self.reporter_id = reporter_id
         self.reported_user_id = reported_user_id
         self.message = message
         self.reason = reason
         self.details = details
         self.score = score
+        self.ml_prediction = ml_prediction  # ML predicition results
         self.timestamp = datetime.now()
         self.status = "pending"
         self.mod_actions = []
@@ -56,12 +63,150 @@ class ModBot(discord.Client):
         intents.message_content = True
         super().__init__(command_prefix='.', intents=intents)
         self.group_num = None
-        self.mod_channels = {} # Map from guild to the mod channel id for that guild
-        self.reports = {} # Map from user IDs to the state of their report
+        self.mod_channels = {} 
+        self.reports = {} 
+        self.mod_reports = [] 
+        self.current_report_index = -1 
+        self.user_scores = {} 
 
-        self.mod_reports = [] # List of reports to be handled by moderators
-        self.current_report_index = -1 # Index of currently viewed report
-        self.user_scores = {} # Map from user IDs to their trust scores
+        self.classifier = None
+        self.conversation_buffer = None
+        self.risk_profiles = None
+        
+        if ML_AVAILABLE:
+            try:
+                self.classifier = GroomingClassifier()
+                self.conversation_buffer = ConversationBuffer(max_messages=50, time_window_hours=24)
+                self.risk_profiles = UserRiskProfile()
+                logging.info("ML components initialized successfully")
+                print("✅ ML components loaded successfully")
+            except Exception as e:
+                logging.error(f"Failed to initialize ML components: {e}")
+                print(f"❌ Failed to load ML components: {e}")
+                print("🔄 Bot will not function without ML components")
+                raise e
+        else:
+            print("⚠️ ML components not available - bot cannot function")
+            raise Exception("ML components required for bot operation")
+
+    def save_flagged_conversation(self, user_id, message, ml_prediction, risk_assessment, conversation_context=None):
+        """Save flagged conversations to a CSV file with enhanced tracking"""
+        filename = f"flagged_conversations_{datetime.now().strftime('%Y%m%d')}.csv"
+        
+        conversation_id = self.generate_conversation_id(message, conversation_context)
+        
+        # Data to save
+        row_data = {
+            'timestamp': datetime.now().isoformat(),
+            'message_id': message.id, 
+            'conversation_id': conversation_id,  
+            'user_id': user_id,
+            'username': message.author.name,
+            'guild_id': message.guild.id,
+            'guild_name': message.guild.name,
+            'channel_id': message.channel.id,
+            'channel_name': message.channel.name,
+            'message_content': message.content,
+            'grooming_probability': ml_prediction.get('grooming_probability', 0) if ml_prediction else 0,
+            'model_confidence': ml_prediction.get('confidence', 0) if ml_prediction else 0,
+            'risk_level': risk_assessment.get('risk_level', 'unknown'),
+            'risk_score': risk_assessment.get('risk_score', 0),
+            'should_escalate': risk_assessment.get('should_escalate', False),
+            'escalation_reason': risk_assessment.get('escalation_reason', ''),
+            'conversation_context_length': len(conversation_context) if conversation_context else 1,
+            'created_at': message.created_at.isoformat()  
+        }
+        
+        file_exists = os.path.exists(filename)
+        
+        with open(filename, 'a', newline='', encoding='utf-8') as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=row_data.keys())
+            
+            if not file_exists:
+                writer.writeheader()
+            
+            writer.writerow(row_data)
+        
+        print(f"📝 Flagged conversation saved to {filename} (Conversation ID: {conversation_id})")
+
+    def generate_conversation_id(self, message, conversation_context=None):
+       
+        time_window_minutes = 30
+        time_bucket = int(message.created_at.timestamp() // (time_window_minutes * 60))
+        
+        conversation_id = f"{message.channel.id}_{message.author.id}_{time_bucket}"
+        
+        if conversation_context and len(conversation_context) > 1:
+            earliest_msg = min(conversation_context, key=lambda m: m.created_at)
+            earliest_time_bucket = int(earliest_msg.created_at.timestamp() // (time_window_minutes * 60))
+            conversation_id = f"{message.channel.id}_{message.author.id}_{earliest_time_bucket}"
+        
+        return conversation_id
+
+    def save_user_profiles(self):
+        """Save all user risk profiles to JSON"""
+        if not self.risk_profiles:
+            return
+        
+        filename = f"user_risk_profiles_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    
+        profiles_data = {}
+        for user_id, profile in self.risk_profiles.user_profiles.items():
+            profiles_data[str(user_id)] = {
+                'risk_score': profile['risk_score'],
+                'total_messages': profile['total_messages'],
+                'flagged_messages': profile['flagged_messages'],
+                'last_updated': profile['last_updated'].isoformat(),
+                'highest_risk_score': profile['highest_risk_score'],
+                'predictions_history': [
+                    {
+                        'timestamp': pred['timestamp'].isoformat(),
+                        'grooming_probability': pred['grooming_probability'],
+                        'confidence': pred['confidence'],
+                        'predicted_class': pred['predicted_class']
+                    }
+                    for pred in profile['predictions_history']
+                ]
+            }
+        
+        with open(filename, 'w', encoding='utf-8') as f:
+            json.dump(profiles_data, f, indent=2, ensure_ascii=False)
+        
+        print(f"👤 User profiles saved to {filename}")
+
+    def export_flagged_users_report(self):
+        """Export a summary report of all flagged users with their IDs"""
+        if not self.risk_profiles:
+            return
+        
+        filename = f"flagged_users_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        
+        with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
+            fieldnames = [
+                'user_id', 'risk_score', 'risk_level', 'total_messages', 
+                'flagged_messages', 'should_escalate', 'escalation_reason',
+                'last_updated', 'highest_risk_score'
+            ]
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+            
+            for user_id, profile in self.risk_profiles.user_profiles.items():
+                risk_level, _ = self.risk_profiles.get_user_risk_level(user_id)
+                should_escalate, escalation_reason = self.risk_profiles.should_escalate(user_id)
+                
+                writer.writerow({
+                    'user_id': user_id,
+                    'risk_score': round(profile['risk_score'], 2),
+                    'risk_level': risk_level,
+                    'total_messages': profile['total_messages'],
+                    'flagged_messages': profile['flagged_messages'],
+                    'should_escalate': should_escalate,
+                    'escalation_reason': escalation_reason,
+                    'last_updated': profile['last_updated'].isoformat(),
+                    'highest_risk_score': round(profile['highest_risk_score'], 2)
+                })
+        
+        print(f"📊 Flagged users report exported to {filename}")
 
     async def on_ready(self):
         print(f'{self.user.name} has connected to Discord! It is these guilds:')
@@ -69,38 +214,30 @@ class ModBot(discord.Client):
             print(f' - {guild.name}')
         print('Press Ctrl-C to quit.')
 
-        # Parse the group number out of the bot's name
         match = re.search('[gG]roup (\d+) [bB]ot', self.user.name)
         if match:
             self.group_num = match.group(1)
         else:
             raise Exception("Group number not found in bot's name. Name format should be \"Group # Bot\".")
 
-        # Find the mod channel in each guild that this bot should report to
         for guild in self.guilds:
             for channel in guild.text_channels:
                 if channel.name == f'group-{self.group_num}-mod':
                     self.mod_channels[guild.id] = channel
         
-        # print(f"Mod channels set up: {self.mod_channels}")
+        print(f"🤖 Pure ML Detection Active - Model: {self.classifier.model_path}")
 
-    async def on_message(self, message):
-        '''
-        This function is called whenever a message is sent in a channel that the bot can see (including DMs). 
-        Currently the bot is configured to only handle messages that are sent over DMs or in your group's "group-#" channel. 
-        '''
-        # Ignore messages from the bot 
+
+    async def on_message(self, message): 
         if message.author.id == self.user.id:
             return
-
-        # Check if this message was sent in a server ("guild") or if it's a DM
         if message.guild:
             await self.handle_channel_message(message)
         else:
             await self.handle_dm(message)
 
+
     async def handle_dm(self, message):
-        # Handle a help message
         if message.content == Report.HELP_KEYWORD:
             reply =  "Use the `report` command to begin the reporting process.\n"
             reply += "Use the `cancel` command to cancel the report process.\n"
@@ -110,56 +247,218 @@ class ModBot(discord.Client):
         author_id = message.author.id
         responses = []
 
-        # Only respond to messages if they're part of a reporting flow
         if author_id not in self.reports and not message.content.startswith(Report.START_KEYWORD):
             return
 
-        # If we don't currently have an active report for this user, add one
         if author_id not in self.reports:
             self.reports[author_id] = Report(self)
 
-        # Let the report class handle this message; forward all the messages it returns to us
         responses = await self.reports[author_id].handle_message(message)
         for r in responses:
             await message.channel.send(r)
 
-        # If the report is complete or cancelled, remove it from our map
         if self.reports[author_id].report_complete():
             self.reports.pop(author_id)
 
     async def handle_channel_message(self, message):
-        # print(f"Channel message: {message.channel.name}")
-        # print(f"Mod channels: {self.mod_channels}")
-        # print(f"Message content: {message.content}")
-        
-        # Check if this is a message in the mod channel
         for guild_id, mod_channel in self.mod_channels.items():
             if message.channel.id == mod_channel.id:
-                print(f"This is a mod channel message")
                 if message.content.startswith('!'):
-                    print(f"This is a mod command: {message.content}")
                     await self.handle_mod_command(message)
                 return
         
-        # Only handle messages sent in the "group-#" channel
         if message.channel.name == f'group-{self.group_num}':
-            # Forward the message to the mod channel
+            await self.process_message_with_ml(message)
+
+    async def process_message_with_ml(self, message):
+        try:
+            self.conversation_buffer.add_message(message.author.id, message)
+            
+            conversation_context = self.conversation_buffer.get_conversation_context(
+                message.author.id, include_recent=10
+            )
+            
+            if len(conversation_context) < 2:
+                conversation_context = [message]
+            
+            conversation_text = self.classifier.format_conversation_for_prediction(conversation_context)
+            ml_prediction = self.classifier.predict_grooming_probability(conversation_text)
+            
+            risk_profile = self.risk_profiles.update_user_score(
+                message.author.id, 
+                ml_prediction,
+                message_context=message.content
+            )
+            
+            risk_level, risk_score = self.risk_profiles.get_user_risk_level(message.author.id)
+            should_escalate, escalation_reason = self.risk_profiles.should_escalate(message.author.id)
+            
+            risk_assessment = {
+                'risk_level': risk_level,
+                'risk_score': risk_score,
+                'should_escalate': should_escalate,
+                'escalation_reason': escalation_reason,
+                'total_messages': risk_profile['total_messages'],
+                'flagged_messages': risk_profile['flagged_messages']
+            }
+            
+            should_save = False
+            if ml_prediction and not ml_prediction.get('error'):
+                prob = ml_prediction.get('grooming_probability', 0)
+                conf = ml_prediction.get('confidence', 0)
+                
+                if prob > self.risk_profiles.grooming_threshold and conf > self.risk_profiles.confidence_threshold:
+                    should_save = True
+            
+            if risk_assessment and risk_assessment.get('should_escalate', False):
+                should_save = True
+            
+            if should_save:
+                self.save_flagged_conversation(message.author.id, message, ml_prediction, risk_assessment, conversation_context)
+
             mod_channel = self.mod_channels[message.guild.id]
+            await self.send_ml_analysis_to_mod_channel(
+                mod_channel, message, ml_prediction, risk_assessment, conversation_context
+            )
             
-            # Evaluate the message content
-            evaluation = self.eval_text(message.content)
+            if risk_assessment['should_escalate']:
+                await self.auto_escalate_user(message, ml_prediction, risk_assessment)
+                
+        except Exception as e:
+            logging.error(f"Error in ML processing: {e}")
+            mod_channel = self.mod_channels[message.guild.id]
+            await mod_channel.send(f"❌ **ML Processing Error:** {str(e)}")
+
+    async def send_ml_analysis_to_mod_channel(self, mod_channel, message, ml_prediction, risk_assessment, context):
+        
+        embed = discord.Embed(
+            title="🤖 AI Message Analysis",
+            description=f"**User:** {message.author.name} ({message.author.id})\n**Channel:** {message.channel.name}",
+            color=self.get_embed_color(ml_prediction, risk_assessment),
+            timestamp=datetime.now()
+        )
+        
+        embed.add_field(
+            name="📝 Message Content",
+            value=f"```{message.content[:1000] if message.content else '*(No content)*'}```",
+            inline=False
+        )
+        
+        if ml_prediction and "error" not in ml_prediction:
+            confidence_pct = ml_prediction['confidence'] * 100
+            grooming_prob_pct = ml_prediction['grooming_probability'] * 100
             
-            # Format and send to mod channel
-            await mod_channel.send(f'Forwarded message:\n{message.author.name}: "{message.content}"')
-            await mod_channel.send(self.code_format(evaluation))
+            prediction_text = f"**Grooming Probability:** {grooming_prob_pct:.1f}%\n"
+            prediction_text += f"**Model Confidence:** {confidence_pct:.1f}%\n"
+            prediction_text += f"**Classification:** {'⚠️ Potential Grooming' if ml_prediction['is_grooming'] else '✅ Likely Safe'}"
+            
+            if ml_prediction.get('filter_reason'):
+                prediction_text += f"\n**Note:** {ml_prediction['filter_reason'][:150]}"
+            
+            embed.add_field(
+                name="🎯 ML Prediction",
+                value=prediction_text,
+                inline=True
+            )
+        elif ml_prediction and "error" in ml_prediction:
+            embed.add_field(
+                name="🎯 ML Prediction",
+                value=f"❌ Error: {ml_prediction['error'][:100]}",
+                inline=True
+            )
+        
+        if risk_assessment:
+            risk_text = f"**Risk Level:** {risk_assessment['risk_level'].title()}\n"
+            risk_text += f"**Risk Score:** {risk_assessment['risk_score']:.1f}/100\n"
+            risk_text += f"**Messages:** {risk_assessment['total_messages']} total, {risk_assessment['flagged_messages']} flagged\n"
+            
+            if risk_assessment['should_escalate']:
+                risk_text += f"\n🚨 **ESCALATION:** {risk_assessment['escalation_reason']}"
+            
+            embed.add_field(
+                name="📊 User Risk Profile",
+                value=risk_text,
+                inline=True
+            )
+        
+        conversation_preview = self.classifier.format_conversation_for_prediction(context)
+        embed.add_field(
+            name="🔍 Analyzed Conversation",
+            value=f"```{conversation_preview[:200]}...```",
+            inline=False
+        )
+        
+        await mod_channel.send(embed=embed)
+
+    def get_embed_color(self, ml_prediction, risk_assessment):
+        if risk_assessment and risk_assessment['should_escalate']:
+            return discord.Color.red()
+        elif ml_prediction and ml_prediction.get('grooming_probability', 0) > 0.8 and ml_prediction.get('confidence', 0) > 0.8:
+            return discord.Color.orange()
+        elif risk_assessment and risk_assessment['risk_level'] in ['critical', 'high']:
+            return discord.Color.yellow()
+        elif ml_prediction and ml_prediction.get('grooming_probability', 0) > 0.6:
+            return discord.Color.gold()
+        else:
+            return discord.Color.green()
+
+    async def auto_escalate_user(self, message, ml_prediction, risk_assessment):
+        """Automatically escalate high-risk users"""
+        try:
+            grooming_prob = ml_prediction.get('grooming_probability', 0) if ml_prediction else 0
+            confidence = ml_prediction.get('confidence', 0) if ml_prediction else 0
+            
+            report_data = {
+                "reporter_id": self.user.id,  
+                "reported_user_id": message.author.id,
+                "message": message,
+                "reason": "🤖 Automatic AI Detection",
+                "details": f"**AI Risk Assessment:** {risk_assessment['escalation_reason']}\n"
+                          f"**Grooming Probability:** {grooming_prob*100:.1f}%\n"
+                          f"**Model Confidence:** {confidence*100:.1f}%\n"
+                          f"**User Risk Score:** {risk_assessment['risk_score']:.1f}/100\n"
+                          f"**Risk Level:** {risk_assessment['risk_level'].title()}",
+                "score": max(10, 100 - risk_assessment['risk_score']),  # Lower score = higher concern
+                "ml_prediction": ml_prediction
+            }
+            
+            self.add_report_to_queue(report_data)
+            
+            mod_channel = self.mod_channels[message.guild.id]
+            alert_embed = discord.Embed(
+                title="🚨 AUTOMATIC AI ESCALATION",
+                description=f"**User {message.author.name}** has been automatically flagged for review",
+                color=discord.Color.red()
+            )
+            alert_embed.add_field(
+                name="🎯 Reason", 
+                value=risk_assessment['escalation_reason'], 
+                inline=False
+            )
+            alert_embed.add_field(
+                name="📊 Risk Score", 
+                value=f"{risk_assessment['risk_score']:.1f}/100 ({risk_assessment['risk_level'].title()})", 
+                inline=True
+            )
+            alert_embed.add_field(
+                name="🤖 AI Confidence", 
+                value=f"{grooming_prob*100:.1f}% grooming probability", 
+                inline=True
+            )
+            alert_embed.add_field(
+                name="⚡ Next Steps", 
+                value="Use `!queue` to review pending reports", 
+                inline=False
+            )
+            
+            await mod_channel.send(embed=alert_embed)
+            
+        except Exception as e:
+            logging.error(f"Error in auto-escalation: {e}")
 
     async def handle_mod_command(self, message):
-        """Handle moderator commands in the mod channel"""
-        # print(f"Handling mod command: {message.content}")
-
         content = message.content.strip().lower()
         
-        # Process commands
         if content == '!queue':
             await self.show_report_queue(message.channel)
         elif content == '!next':
@@ -170,9 +469,103 @@ class ModBot(discord.Client):
             await self.handle_mod_action(message.channel, content)
         elif content.startswith('!search'):
             await self.search_messages(message.channel, content)
+        elif content.startswith('!profile'):
+            await self.show_user_profile(message.channel, content)
+        elif content == '!export':
+            await self.export_data(message.channel)
+        elif content == '!save':
+            await self.save_data(message.channel)
         elif content.startswith('!help'):
             await self.show_mod_help(message.channel)
+
+    async def export_data(self, channel):
+        try:
+            self.save_user_profiles()
+            self.export_flagged_users_report()
+            await channel.send("📁 **Data exported successfully!** Check the bot directory for files:\n"
+                             f"• `flagged_conversations_{datetime.now().strftime('%Y%m%d')}.csv` - Daily flagged messages\n"
+                             f"• `user_risk_profiles_[timestamp].json` - Complete user data\n"
+                             f"• `flagged_users_report_[timestamp].csv` - Summary of high-risk users")
+        except Exception as e:
+            await channel.send(f"❌ Export failed: {e}")
+
+    async def save_data(self, channel):
+        try:
+            self.save_user_profiles()
+            await channel.send("💾 User profiles saved successfully!")
+        except Exception as e:
+            await channel.send(f"❌ Save failed: {e}")
     
+    async def show_user_profile(self, channel, content):
+        parts = content.split()
+        if len(parts) < 2:
+            await channel.send("Please specify a user ID: `!profile [user_id]`")
+            return
+        
+        try:
+            user_id = int(parts[1])
+        except ValueError:
+            await channel.send("Invalid user ID. Please provide a numeric user ID.")
+            return
+        
+        if not self.risk_profiles or user_id not in self.risk_profiles.user_profiles:
+            await channel.send(f"No profile data found for user ID: {user_id}")
+            return
+        
+        profile = self.risk_profiles.user_profiles[user_id]
+        risk_level, risk_score = self.risk_profiles.get_user_risk_level(user_id)
+        should_escalate, escalation_reason = self.risk_profiles.should_escalate(user_id)
+        
+        try:
+            user = await self.fetch_user(user_id)
+            user_name = user.name
+        except:
+            user_name = "Unknown User"
+        
+        embed = discord.Embed(
+            title=f"👤 User Profile: {user_name}",
+            description=f"User ID: {user_id}",
+            color=discord.Color.red() if should_escalate else discord.Color.blue()
+        )
+        
+        embed.add_field(
+            name="📊 Statistics",
+            value=f"**Total Messages:** {profile['total_messages']}\n"
+                  f"**Flagged Messages:** {profile['flagged_messages']}\n"
+                  f"**Last Updated:** {profile['last_updated'].strftime('%Y-%m-%d %H:%M')}",
+            inline=True
+        )
+        
+
+        embed.add_field(
+            name="⚠️ Risk Assessment",
+            value=f"**Current Score:** {risk_score:.1f}/100\n"
+                  f"**Risk Level:** {risk_level.title()}\n"
+                  f"**Highest Score:** {profile['highest_risk_score']:.1f}",
+            inline=True
+        )
+        
+        if profile['predictions_history']:
+            recent = profile['predictions_history'][-5:]  
+            recent_text = ""
+            for i, pred in enumerate(recent):
+                recent_text += f"{i+1}. {pred['grooming_probability']*100:.1f}% (conf: {pred['confidence']*100:.1f}%)\n"
+            
+            embed.add_field(
+                name="🔮 Recent Predictions",
+                value=recent_text or "No recent predictions",
+                inline=False
+            )
+        
+        if should_escalate:
+            embed.add_field(
+                name="🚨 Escalation Status",
+                value=f"**REQUIRES ESCALATION**\n{escalation_reason}",
+                inline=False
+            )
+        
+        await channel.send(embed=embed)
+
     async def show_report_queue(self, channel):
         """Show a list of pending reports"""
         if not self.mod_reports:
@@ -184,10 +577,11 @@ class ModBot(discord.Client):
             await channel.send("No pending reports in the queue.")
             return
         
-        embed = discord.Embed(title="Report Queue", color=discord.Color.blue())
+        embed = discord.Embed(title="📋 Report Queue", color=discord.Color.blue())
         for i, report in enumerate(pending_reports):
+            ai_indicator = "🤖 " if report.ml_prediction else ""
             embed.add_field(
-                name=f"Report #{i+1}: {report.reason}", 
+                name=f"Report #{i+1}: {ai_indicator}{report.reason}", 
                 value=f"From: <@{report.reporter_id}> | Against: <@{report.reported_user_id}> | Score: {report.score}",
                 inline=False
             )
@@ -199,7 +593,6 @@ class ModBot(discord.Client):
             await channel.send("No reports in the queue.")
             return
         
-        # Finding the next pending report
         for _ in range(len(self.mod_reports)):
             self.current_report_index = (self.current_report_index + 1) % len(self.mod_reports)
             if self.mod_reports[self.current_report_index].status == "pending":
@@ -211,23 +604,28 @@ class ModBot(discord.Client):
         report = self.mod_reports[self.current_report_index]
         
         embed = discord.Embed(
-            title=f"Report: {report.reason}",
-            description=f"Score: {report.score}",
+            title=f"📋 Report: {report.reason}",
+            description=f"**Score:** {report.score}/100",
             color=discord.Color.red() if report.score < 30 else discord.Color.orange()
         )
-        embed.add_field(name="Reporter", value=f"<@{report.reporter_id}>", inline=True)
-        embed.add_field(name="Reported User", value=f"<@{report.reported_user_id}>", inline=True)
-        embed.add_field(name="Details", value=report.details, inline=False)
-        embed.add_field(name="Status", value=report.status, inline=False)
-        embed.add_field(name="Options", value="Use `!view thread` to see the full message thread\n"
+        embed.add_field(name="👤 Reporter", value=f"<@{report.reporter_id}>", inline=True)
+        embed.add_field(name="⚠️ Reported User", value=f"<@{report.reported_user_id}>", inline=True)
+        embed.add_field(name="📝 Details", value=report.details[:1000], inline=False)
+        
+        if report.ml_prediction:
+            ml_info = f"**Grooming Probability:** {report.ml_prediction['grooming_probability']*100:.1f}%\n"
+            ml_info += f"**Model Confidence:** {report.ml_prediction['confidence']*100:.1f}%"
+            embed.add_field(name="🤖 AI Analysis", value=ml_info, inline=True)
+        
+        embed.add_field(name="📊 Status", value=report.status, inline=True)
+        embed.add_field(name="⚡ Options", value="Use `!view thread` to see the full message thread\n"
                                          "Use `!view message` to see the reported message\n"
                                          "Use `!search [keywords]` to search for keywords\n"
+                                         "Use `!profile [user_id]` to see user profile\n"
                                          "Use `!action [type]` to take action", inline=False)
         await channel.send(embed=embed)
 
-
     async def view_report_details(self, channel, content):
-        """View detailed information about the current report"""
         if not self.mod_reports or self.current_report_index < 0:
             await channel.send("No report currently selected. Use `!next` to select a report.")
             return
@@ -247,7 +645,6 @@ class ModBot(discord.Client):
         else:
             await channel.send("Unknown view type. Use `thread` or `message`.")
 
-
     async def view_message_thread(self, channel, report):
         """Show the full message thread around the reported message"""
         message = report.message
@@ -255,7 +652,6 @@ class ModBot(discord.Client):
             await channel.send("Message not available.")
             return
         
-        # Getting the guild and channel where the message was sent
         guild = self.get_guild(message.guild.id)
         if not guild:
             await channel.send("Cannot access the guild where this message was sent.")
@@ -267,23 +663,22 @@ class ModBot(discord.Client):
             return
         
         try:
-            
             messages = []
             async for msg in text_channel.history(limit=10, around=message):
                 messages.append(msg)
             messages.sort(key=lambda m: m.created_at)
             
-            embed = discord.Embed(title="Message Thread", description=f"Channel: {text_channel.name}", color=discord.Color.blue())
+            embed = discord.Embed(title="💬 Message Thread", description=f"Channel: {text_channel.name}", color=discord.Color.blue())
             for msg in messages:
+                name_prefix = "⚠️ " if msg.id == message.id else ""
                 embed.add_field(
-                    name=f"{msg.author.name} ({msg.created_at.strftime('%Y-%m-%d %H:%M')})",
+                    name=f"{name_prefix}{msg.author.name} ({msg.created_at.strftime('%Y-%m-%d %H:%M')})",
                     value=msg.content[:1024] if msg.content else "(No content)",
                     inline=False
                 )
             await channel.send(embed=embed)
         except Exception as e:
             await channel.send(f"Error retrieving message thread: {str(e)}")
-
 
     async def view_reported_message(self, channel, report):
         """Show just the reported message"""
@@ -293,15 +688,20 @@ class ModBot(discord.Client):
             return
         
         embed = discord.Embed(
-            title="Reported Message",
+            title="⚠️ Reported Message",
             description=f"From: {message.author.name}",
             color=discord.Color.red()
         )
         embed.add_field(name="Content", value=message.content[:1024] if message.content else "(No content)", inline=False)
         embed.add_field(name="Sent At", value=message.created_at.strftime("%Y-%m-%d %H:%M"), inline=True)
         embed.add_field(name="Channel", value=message.channel.name, inline=True)
+        
+        if report.ml_prediction:
+            ml_text = f"Grooming Probability: {report.ml_prediction['grooming_probability']*100:.1f}%\n"
+            ml_text += f"Model Confidence: {report.ml_prediction['confidence']*100:.1f}%"
+            embed.add_field(name="🤖 AI Analysis", value=ml_text, inline=False)
+        
         await channel.send(embed=embed)
-
 
     async def search_messages(self, channel, content):
         """Search for keywords in the message history"""
@@ -329,7 +729,6 @@ class ModBot(discord.Client):
             await channel.send("Cannot access the channel where this message was sent.")
             return
         
-        # Searching for messages with keywords
         try:
             messages = []
             async for msg in text_channel.history(limit=100, around=message):
@@ -348,12 +747,12 @@ class ModBot(discord.Client):
                 return
             
             embed = discord.Embed(
-                title=f"Messages Containing Keywords", 
+                title=f"🔍 Messages Containing Keywords", 
                 description=f"Found {len(matching_messages)} messages with keywords: {', '.join(keywords)}",
                 color=discord.Color.gold()
             )
             
-            for i, msg in enumerate(matching_messages[:10]):  # Limit to 10 messages
+            for i, msg in enumerate(matching_messages[:10]): 
                 embed.add_field(
                     name=f"Message {i+1} ({msg.created_at.strftime('%Y-%m-%d %H:%M')})",
                     value=msg.content[:1024] if msg.content else "(No content)",
@@ -366,7 +765,6 @@ class ModBot(discord.Client):
             await channel.send(embed=embed)
         except Exception as e:
             await channel.send(f"Error searching messages: {str(e)}")
-
 
     async def handle_mod_action(self, channel, content):
         """Handle moderator actions on reports"""
@@ -395,7 +793,6 @@ class ModBot(discord.Client):
             except ValueError:
                 await channel.send("Invalid duration. Please use a number of days.")
         elif action_type == "decrease":
-            # Decreasing the user's score
             if len(parts) < 3:
                 await channel.send("Please specify new score: `!action decrease [new_score]`")
                 return
@@ -406,7 +803,7 @@ class ModBot(discord.Client):
                 await channel.send("Invalid score. Please use a number.")
         elif action_type == "report":
             await self.report_to_law(channel, report)
-        elif action_type == "none": # Taking no action
+        elif action_type == "none":
             report.status = "completed"
             report.mod_actions.append(ModAction.NO_ACTION)
             await channel.send("No action taken. Report marked as complete.")
@@ -414,7 +811,6 @@ class ModBot(discord.Client):
             await channel.send("Report skipped. Use `!next` to move to the next report.")
         else:
             await channel.send("Unknown action type. Use `ban`, `suspend`, `decrease`, `report`, `none`, or `skip`.")
-
 
     async def ban_user(self, channel, report):
         """Ban a user"""
@@ -482,10 +878,12 @@ class ModBot(discord.Client):
             return
         self.user_scores[report.reported_user_id] = new_score
         
+        if self.risk_profiles and report.reported_user_id in self.risk_profiles.user_profiles:
+            self.risk_profiles.user_profiles[report.reported_user_id]['risk_score'] = 100 - new_score
+        
         report.status = "completed"
         report.mod_actions.append(ModAction.DECREASE_SCORE)
         await channel.send(f"User's trust score has been updated to {new_score}.")
-
 
     async def report_to_law(self, channel, report):
         """Simulate reporting to law enforcement"""
@@ -509,15 +907,17 @@ class ModBot(discord.Client):
         except asyncio.TimeoutError:
             await channel.send("Law enforcement reporting action timed out.")
 
-
     async def show_mod_help(self, channel):
         """Show help for moderator commands"""
-        embed = discord.Embed(title="Moderator Commands Help", color=discord.Color.blue())
+        embed = discord.Embed(title="🔧 Moderator Commands Help", color=discord.Color.blue())
         embed.add_field(name="!queue", value="Show pending reports in the queue", inline=False)
         embed.add_field(name="!next", value="View the next report in the queue", inline=False)
         embed.add_field(name="!view thread", value="View the full message thread around the reported message", inline=False)
         embed.add_field(name="!view message", value="View just the reported message", inline=False)
         embed.add_field(name="!search [keywords]", value="Search for messages with keywords", inline=False)
+        embed.add_field(name="!profile [user_id]", value="Show detailed user risk profile", inline=False)
+        embed.add_field(name="!export", value="Export all flagged data to CSV/JSON files", inline=False)
+        embed.add_field(name="!save", value="Save current user profiles to file", inline=False)
         embed.add_field(name="!action ban", value="Ban the reported user", inline=False)
         embed.add_field(name="!action suspend [days]", value="Suspend the user for specified days", inline=False)
         embed.add_field(name="!action decrease [score]", value="Set a new trust score for the user", inline=False)
@@ -525,64 +925,11 @@ class ModBot(discord.Client):
         embed.add_field(name="!action none", value="Take no action and mark report as complete", inline=False)
         embed.add_field(name="!action skip", value="Skip this report for now", inline=False)
         embed.add_field(name="!help", value="Show this help message", inline=False)
+        
+        embed.set_footer(text="🤖 Pure ML Detection Active - No Rule-Based Filtering")
+        
         await channel.send(embed=embed)
-    
 
-
-
-    def eval_text(self, message):
-        """
-        Evaluate the message text for potential child safety issues.
-        Returns a dictionary with evaluation scores and flags.
-        """
-        evaluation = {
-            "score": 100, 
-            "flags": []
-        }
-        
-        child_safety_keywords = [
-            "meet up", "meetup", "where do you live", "how old are you", 
-            "send pic", "send photo", "don't tell", "our secret", "keep secret",
-            "alone", "private", "just us", "dm me", "message me"
-        ]
-        
-        msg_lower = message.lower()
-        for keyword in child_safety_keywords:
-            if keyword in msg_lower:
-                evaluation["score"] -= 20
-                evaluation["flags"].append(f"Child safety concern: '{keyword}'")
-        
-        if len(message) < 5:
-            evaluation["score"] -= 5
-            evaluation["flags"].append("Very short message")
-        elif len(message) > 500:
-            evaluation["score"] -= 10
-            evaluation["flags"].append("Very long message")
-        
-        evaluation["score"] = max(0, min(100, evaluation["score"]))
-        
-        return evaluation
-
-    
-    def code_format(self, evaluation):
-        """Format the evaluation results for display in the mod channel"""
-        result = f"**Message Score: {evaluation['score']}/100**\n"
-        
-        if evaluation["flags"]:
-            result += "**Flags:**\n"
-            for flag in evaluation["flags"]:
-                result += f"- {flag}\n"
-        else:
-            result += "No flags detected."
-        
-        # Adding color formatting based on score
-        if evaluation["score"] < 30:
-            return f"```diff\n- {result}\n```"  # Red formatting
-        elif evaluation["score"] < 70:
-            return f"```fix\n{result}\n```"  # Yellow formatting
-        else:
-            return f"```\n{result}\n```"  # Normal formatting
-        
     def add_report_to_queue(self, report_data):
         """Add a report to the moderation queue from report data"""
         new_report = ModReport(
@@ -591,7 +938,8 @@ class ModBot(discord.Client):
             message=report_data["message"],
             reason=report_data["reason"],
             details=report_data["details"],
-            score=report_data["score"]
+            score=report_data["score"],
+            ml_prediction=report_data.get("ml_prediction")
         )
         self.mod_reports.append(new_report)
 
