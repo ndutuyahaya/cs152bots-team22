@@ -8,9 +8,13 @@ import re
 import requests
 from report import Report
 import asyncio
+from backend import bot_backend as ustats
 from datetime import datetime, timedelta
 from enum import Enum, auto
 import csv
+
+BAN_THRESHOLD = 20
+SUSPEND_THRESHOLD = 40
 
 try:
     from classifier import GroomingClassifier, ConversationBuffer, UserRiskProfile
@@ -44,6 +48,9 @@ class ModAction(Enum):
 
 
 class ModReport:
+    """
+    Class which contains object instances representing a report.
+    """
     def __init__(self, reporter_id, reported_user_id, message, reason, details, score=50, ml_prediction=None):
         self.reporter_id = reporter_id
         self.reported_user_id = reported_user_id
@@ -88,6 +95,9 @@ class ModBot(discord.Client):
         else:
             print("⚠️ ML components not available - bot cannot function")
             raise Exception("ML components required for bot operation")
+        
+        # Initialize backend database upon bot initialization2
+        ustats.initialize_database()
 
     def save_flagged_conversation(self, user_id, message, ml_prediction, risk_assessment, conversation_context=None):
         """Save flagged conversations to a CSV file with enhanced tracking"""
@@ -130,7 +140,7 @@ class ModBot(discord.Client):
         print(f"📝 Flagged conversation saved to {filename} (Conversation ID: {conversation_id})")
 
     def generate_conversation_id(self, message, conversation_context=None):
-       
+        """Creates and generates a conversation ID based on time buckets."""
         time_window_minutes = 30
         time_bucket = int(message.created_at.timestamp() // (time_window_minutes * 60))
         
@@ -266,12 +276,13 @@ class ModBot(discord.Client):
                 if message.content.startswith('!'):
                     await self.handle_mod_command(message)
                 return
-        
+        # Handle all regular channel messages to process grooming risk with ML.
         if message.channel.name == f'group-{self.group_num}':
             await self.process_message_with_ml(message)
 
     async def process_message_with_ml(self, message):
         try:
+            # Following lines use context of convo to predict grooming probability.
             self.conversation_buffer.add_message(message.author.id, message)
             
             conversation_context = self.conversation_buffer.get_conversation_context(
@@ -306,13 +317,13 @@ class ModBot(discord.Client):
             if ml_prediction and not ml_prediction.get('error'):
                 prob = ml_prediction.get('grooming_probability', 0)
                 conf = ml_prediction.get('confidence', 0)
-                
+                # Checking if prediction results are large enough to flag.
                 if prob > self.risk_profiles.grooming_threshold and conf > self.risk_profiles.confidence_threshold:
                     should_save = True
             
             if risk_assessment and risk_assessment.get('should_escalate', False):
                 should_save = True
-            
+            # Track the flagged convo.
             if should_save:
                 self.save_flagged_conversation(message.author.id, message, ml_prediction, risk_assessment, conversation_context)
 
@@ -320,14 +331,85 @@ class ModBot(discord.Client):
             await self.send_ml_analysis_to_mod_channel(
                 mod_channel, message, ml_prediction, risk_assessment, conversation_context
             )
-            
+            # For riskiest of conversations, immediately escalate
             if risk_assessment['should_escalate']:
                 await self.auto_escalate_user(message, ml_prediction, risk_assessment)
+            
+            # We want to store info of those who we need to log.
+            if ml_prediction and not ml_prediction.get('error') :
+                if prob > self.risk_profiles.grooming_threshold and conf > self.risk_profiles.confidence_threshold:       
+                    grooming_suspected = True
+                else:
+                    grooming_suspected = False # Keep it binary, false means no/undetermrined
+                user_id = message.author.id
+                username = message.author.name
+                message_id = message.id
+
+                conversation_id = self.generate_conversation_id(message, conversation_context)
+                mod_channel = self.mod_channels[message.guild.id]
+                print(f"user id currently being checked is {user_id} with username {username}")
+                if not ustats.check_user_exists(user_id):
+                    ustats.add_user(user_id, username)
+                ustats.log_conversation(user_id, message_id, conversation_id, conf, grooming_suspected)
+                await self.handle_backend_updates(user_id, message, mod_channel)
                 
         except Exception as e:
             logging.error(f"Error in ML processing: {e}")
             mod_channel = self.mod_channels[message.guild.id]
             await mod_channel.send(f"❌ **ML Processing Error:** {str(e)}")
+    
+    async def handle_backend_updates(self, user_id, message, mod_channel):
+        """Handles checking backend updates and conducting moderator actions."""
+        try:
+            user_info = ustats.get_user_stats(user_id)
+            # TODO: check for better way to get thresholds.
+            if int(user_info.get('reputation_score', 100)) < BAN_THRESHOLD:
+                # TODO: add law enforcement reporting
+                await self.autoban_user(message, mod_channel)
+            elif int(user_info.get('reputation_score', 100)) < SUSPEND_THRESHOLD:
+                # TODO: calculate suspension length
+                suspension_length = 30
+                await self.autosuspend_user(message, mod_channel, suspension_length)
+            else:
+                return
+        except Exception as e:
+            await mod_channel.send(f"Error updating database for user: {str(e)}")
+
+
+    async def autoban_user(self, message, mod_channel):
+        """Ban a user"""
+        guild = self.get_guild(message.guild.id)
+        if not guild:
+            await mod_channel.send("Cannot access the guild for this report.")
+            return
+        try:
+            member = await guild.fetch_member(message.author.id)
+            if not member:
+                await mod_channel.send("Cannot find the reported user in the guild.")
+                return
+            ### UNCHECK TO ACTUALLY BAN ###
+            # await guild.ban(member, reason=f"{member.name} has been banned for violating TOS.")
+            await mod_channel.send(f"User {member.name} has been banned due to engaging in child grooming.")
+        except Exception as e:
+            await mod_channel.send(f"Error banning user: {str(e)}")
+
+
+    async def autosuspend_user(self, message, mod_channel, length):
+        """Ban a user"""
+        guild = self.get_guild(message.guild.id)
+        if not guild:
+            await mod_channel.send("Cannot access the guild for this report.")
+            return
+        try:
+            member = await guild.fetch_member(message.author.id)
+            if not member:
+                await mod_channel.send("Cannot find the reported user in the guild.")
+                return
+            ### UNCHECK TO ACTUALLY BAN ###
+            # await guild.ban(member, reason=f"{member.name} has been banned for violating TOS.")
+            await mod_channel.send(f"User {member.name} has been suspended for {length} days due to violating Terms of Service")
+        except Exception as e:
+            await mod_channel.send(f"Error suspending user: {str(e)}")
 
     async def send_ml_analysis_to_mod_channel(self, mod_channel, message, ml_prediction, risk_assessment, context):
         
@@ -456,6 +538,7 @@ class ModBot(discord.Client):
         except Exception as e:
             logging.error(f"Error in auto-escalation: {e}")
 
+    ### Everything Below These Lines are Relevant to Manual Reporting ###
     async def handle_mod_command(self, message):
         content = message.content.strip().lower()
         
@@ -565,6 +648,7 @@ class ModBot(discord.Client):
             )
         
         await channel.send(embed=embed)
+    
 
     async def show_report_queue(self, channel):
         """Show a list of pending reports"""

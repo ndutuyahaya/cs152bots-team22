@@ -7,7 +7,7 @@ def create_connection():
     """Create a database connection to SQLite."""
     conn = None
     try:
-        conn = sqlite3.connect('user_stats.db')
+        conn = sqlite3.connect('backend/user_stats.db')
         print("Connected to SQLite database.")
     except Error as e:
         print(f"Error connecting to database: {e}")
@@ -18,7 +18,7 @@ def initialize_database():
     conn = create_connection()
     if conn:
         try:
-            with open('schema.sql', 'r') as f:
+            with open('backend/schema.sql', 'r') as f:
                 schema = f.read()
             conn.executescript(schema)
             print("Database initialized.")
@@ -27,7 +27,7 @@ def initialize_database():
         finally:
             conn.close()
 
-def add_user(user_id, profile_name, age):
+def add_user(user_id, profile_name, age=None):
     """Add a new user to the database."""
     conn = create_connection()
     if conn:
@@ -40,19 +40,41 @@ def add_user(user_id, profile_name, age):
             conn.commit()
             print(f"User '{profile_name}' added with user_id '{user_id}'.")
         except sqlite3.IntegrityError as e:
-            print(f"Error: {e} (likely duplicate user_id)")
+            print(f"Error: {e}")
         finally:
             conn.close()
 
-def log_conversation(user_id, message_id, confidence_score, grooming_suspected):
+def check_user_exists(user_id):
+    """Check if a user exists in the database."""
+    conn = create_connection()
+    if conn:
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT 1 FROM users WHERE user_id = ?",
+                (user_id,)
+            )
+            result = cursor.fetchone()
+            if result:
+                return True
+            else:
+                return False
+        except Error as e:
+            print(f"Error checking if user exists: {e}")
+            return False
+        finally:
+            conn.close()
+
+# Conversation_id instead of message_id. also need ids of both users.
+def log_conversation(user_id, message_id, conversation_id, confidence_score, grooming_suspected):
     """Log a conversation with its details and update reputation score if necessary."""
     conn = create_connection()
     if conn:
         try:
             cursor = conn.cursor()
             cursor.execute(
-                "INSERT INTO conversations (user_id, message_id, confidence_score, grooming_suspected) VALUES (?, ?, ?, ?)",
-                (user_id, message_id, confidence_score, grooming_suspected)
+                "INSERT INTO conversations (user_id, message_id, conversation_id, confidence_score, grooming_suspected) VALUES (?, ?, ?, ?, ?)",
+                (user_id, message_id, conversation_id,confidence_score, grooming_suspected)
             )
             # Update reputation score only if criteria are met
             if confidence_score >= CONFIDENCE_THRESHOLD and grooming_suspected:
@@ -62,6 +84,7 @@ def log_conversation(user_id, message_id, confidence_score, grooming_suspected):
                 )
                 reputation_score = cursor.fetchone()[0]
                 # Decrease reputation score
+                # Think about number of conversations as well
                 new_reputation_score = max(0, reputation_score - ((confidence_score - CONFIDENCE_THRESHOLD) * 100))
                 cursor.execute(
                     "UPDATE users SET reputation_score = ? WHERE user_id = ?",
@@ -108,25 +131,3 @@ def get_user_stats(user_id):
         finally:
             conn.close()
 
-# Example Usage
-if __name__ == "__main__":
-    initialize_database()
-
-    # Add a user
-    user_id = "BobistheMan"
-    add_user(user_id, "Bobbit", 47)
-    
-    # Log conversations (simulate bot interactions)
-    log_conversation(user_id, "m001xABC", 0.85, True)  # Reputation should decrease
-    log_conversation(user_id, "m002xABC", 0.92, True)  # Reputation should decrease further
-    log_conversation(user_id, "m003xabc", 0.45, False) # No reputation change
-    
-    # Fetch stats
-    stats = get_user_stats(user_id)
-    if stats:
-        print(f"\nUser Stats for {stats['profile_name']}:")
-        print(f"  Age: {stats['age']}")
-        print(f"  Reputation Score: {stats['reputation_score']:.2f}")
-        print("  Conversations:")
-        for convo in stats['conversations']:
-            print(f"    - Message: {convo['message_id']}, Confidence: {convo['confidence_score']}, Grooming Suspected: {convo['grooming_suspected']}, Timestamp: {convo['timestamp']}")
