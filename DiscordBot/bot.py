@@ -13,9 +13,6 @@ from datetime import datetime, timedelta
 from enum import Enum, auto
 import csv
 
-BAN_THRESHOLD = 20
-SUSPEND_THRESHOLD = 40
-
 try:
     from classifier import GroomingClassifier, ConversationBuffer, UserRiskProfile
     ML_AVAILABLE = True
@@ -347,33 +344,65 @@ class ModBot(discord.Client):
 
                 conversation_id = self.generate_conversation_id(message, conversation_context)
                 mod_channel = self.mod_channels[message.guild.id]
-                print(f"user id currently being checked is {user_id} with username {username}")
+
                 if not ustats.check_user_exists(user_id):
                     ustats.add_user(user_id, username)
-                ustats.log_conversation(user_id, message_id, conversation_id, conf, grooming_suspected)
-                await self.handle_backend_updates(user_id, message, mod_channel)
+
+                risk_level, ml_risk_score = self.risk_profiles.get_user_risk_level(user_id)
+
+                ustats.log_conversation(user_id, message_id, conversation_id, conf, grooming_suspected, ml_risk_score)
+
+                await self.handle_backend_updates(user_id, username, message, mod_channel)
                 
         except Exception as e:
             logging.error(f"Error in ML processing: {e}")
             mod_channel = self.mod_channels[message.guild.id]
             await mod_channel.send(f"❌ **ML Processing Error:** {str(e)}")
     
-    async def handle_backend_updates(self, user_id, message, mod_channel):
+
+    async def handle_backend_updates(self, user_id, username, message, mod_channel):
         """Handles checking backend updates and conducting moderator actions."""
         try:
+            # First gather current risk_score and update that in the backend
             user_info = ustats.get_user_stats(user_id)
-            # TODO: check for better way to get thresholds.
-            if int(user_info.get('reputation_score', 100)) < BAN_THRESHOLD:
-                # TODO: add law enforcement reporting
+
+            # Note, this risk score differs from the ml_risk_score in that it weighs messages.
+            if user_info.get('risk_score', 50) > ustats.REPORT_THRESHOLD and not user_info['reported_law']:
+                ustats.update_report_to_law(user_id, username, True, True)
+                await self.autoreport_user(message, mod_channel) 
+
+            elif user_info.get('risk_score', 50) > ustats.BAN_THRESHOLD and not user_info['banned']:
+                ustats.update_ban(user_id, username, True)
                 await self.autoban_user(message, mod_channel)
-            elif int(user_info.get('reputation_score', 100)) < SUSPEND_THRESHOLD:
-                # TODO: calculate suspension length
+
+            elif user_info.get('risk_score', 50) > ustats.SUSPEND_THRESHOLD and not user_info['suspended'] and not user_info['banned']:
+                # Suspension length dependent on org policy.
                 suspension_length = 30
+                ustats.update_suspension(user_id, username, True, suspension_length)
                 await self.autosuspend_user(message, mod_channel, suspension_length)
+
             else:
                 return
+            
         except Exception as e:
             await mod_channel.send(f"Error updating database for user: {str(e)}")
+
+
+    async def autosuspend_user(self, message, mod_channel, length):
+        """Suspend a user"""
+        guild = self.get_guild(message.guild.id)
+        if not guild:
+            await mod_channel.send("Cannot access the guild for this report.")
+            return
+        try:
+            member = await guild.fetch_member(message.author.id)
+            if not member:
+                await mod_channel.send("Cannot find the reported user in the guild.")
+                return
+            
+            await self.send_consequence_analysis_to_mod_channel(message, mod_channel, 0, length)
+        except Exception as e:
+            await mod_channel.send(f"Error suspending user: {str(e)}")
 
 
     async def autoban_user(self, message, mod_channel):
@@ -389,13 +418,13 @@ class ModBot(discord.Client):
                 return
             ### UNCHECK TO ACTUALLY BAN ###
             # await guild.ban(member, reason=f"{member.name} has been banned for violating TOS.")
-            await mod_channel.send(f"User {member.name} has been banned due to engaging in child grooming.")
+            await self.send_consequence_analysis_to_mod_channel(message, mod_channel, 1)
         except Exception as e:
-            await mod_channel.send(f"Error banning user: {str(e)}")
+            await mod_channel.send(f"Error banning user: {str(e)}")  
 
 
-    async def autosuspend_user(self, message, mod_channel, length):
-        """Ban a user"""
+    async def autoreport_user(self, message, mod_channel):
+        """Suspend a user"""
         guild = self.get_guild(message.guild.id)
         if not guild:
             await mod_channel.send("Cannot access the guild for this report.")
@@ -405,11 +434,55 @@ class ModBot(discord.Client):
             if not member:
                 await mod_channel.send("Cannot find the reported user in the guild.")
                 return
-            ### UNCHECK TO ACTUALLY BAN ###
-            # await guild.ban(member, reason=f"{member.name} has been banned for violating TOS.")
-            await mod_channel.send(f"User {member.name} has been suspended for {length} days due to violating Terms of Service")
+
+            await self.send_consequence_analysis_to_mod_channel(message, mod_channel, 2)
         except Exception as e:
-            await mod_channel.send(f"Error suspending user: {str(e)}")
+            await mod_channel.send(f"Error reporting user to law enforcement: {str(e)}")
+
+
+    async def send_consequence_analysis_to_mod_channel(self, message, mod_channel, consequence, suspension_len=0):
+        """
+        Send message alerting of any bans, suspensions, reports to law enforcement.
+
+        Consequence: Can be of values 0, 1, or >=2 indicating suspension, ban, or report 
+        to law enforcement respectively.
+        """
+        if consequence == 0:
+            alert_embed = discord.Embed(
+                    title="🚨 BOT ALERT",
+                    description=f"**User {message.author.name}** has been suspended for {suspension_len} days.",
+                    color=discord.Color.red()
+                )
+            alert_embed.add_field(
+                name="🎯 Reason", 
+                value="Engaging in potential child grooming activities.", 
+                inline=False
+            )
+        elif consequence == 1:
+            alert_embed = discord.Embed(
+                    title="🚨 BOT ALERT",
+                    description=f"**User {message.author.name}** has been banned due to violating Terms of Service.",
+                    color=discord.Color.red()
+                )
+            alert_embed.add_field(
+                name="🎯 Reason", 
+                value="Engaging in child grooming activities.",
+                inline=False
+            )
+        else: 
+            alert_embed = discord.Embed(
+                    title="🚨 BOT ALERT",
+                    description=f"**User {message.author.name}** has been banned and reported to law enforcement for violating Terms of Service.",
+                    color=discord.Color.red()
+                )
+            alert_embed.add_field(
+                name="🎯 Reason", 
+                value="Presenting an immediate danger to the safety of children.",
+                inline=False
+            )
+            
+        await mod_channel.send(embed=alert_embed)
+        
 
     async def send_ml_analysis_to_mod_channel(self, mod_channel, message, ml_prediction, risk_assessment, context):
         

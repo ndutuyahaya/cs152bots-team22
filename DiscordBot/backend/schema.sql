@@ -7,7 +7,8 @@ CREATE TABLE IF NOT EXISTS users (
     suspended BOOLEAN NOT NULL DEFAULT 0,
     suspension_len INTEGER DEFAULT 0 CHECK (suspension_len >= 0),
     reported_law BOOLEAN NOT NULL DEFAULT 0, 
-    reputation_score REAL DEFAULT 100.0 CHECK (reputation_score BETWEEN 0 AND 100)
+    risk_score REAL DEFAULT 50.0 CHECK (risk_score BETWEEN 0 AND 100),
+    message_count INTEGER DEFAULT 0 CHECK (message_count >= 0)
 );
 
 -- Conversations table
