@@ -38,28 +38,28 @@ class Report:
         
         if self.state == State.REPORT_START:
             reply =  "Thank you for starting the reporting process. "
-            reply += "Say `help` at any time for more information.\n\n"
+            reply += "Say 'help' at any time for more information.\n\n"
             reply += "Please copy paste the link to the message you want to report.\n"
-            reply += "You can obtain this link by right-clicking the message and clicking `Copy Message Link`."
+            reply += "You can obtain this link by right-clicking the message and clicking 'Copy Message Link'."
             self.state = State.AWAITING_MESSAGE
             return [reply]
         
         if self.state == State.AWAITING_MESSAGE:
             m = re.search('/(\d+)/(\d+)/(\d+)', message.content)
             if not m:
-                return ["I'm sorry, I couldn't read that link. Please try again or say `cancel` to cancel."]
+                return ["I'm sorry, I couldn't read that link. Please try again or say 'cancel' to cancel."]
             guild = self.client.get_guild(int(m.group(1)))
             if not guild:
                 return ["I cannot accept reports of messages from guilds that I'm not in. Please have the guild owner add me to the guild and try again."]
             channel = guild.get_channel(int(m.group(2)))
             if not channel:
-                return ["It seems this channel was deleted or never existed. Please try again or say `cancel` to cancel."]
+                return ["It seems this channel was deleted or never existed. Please try again or say 'cancel' to cancel."]
             try:
                 self.message = await channel.fetch_message(int(m.group(3)))
             except discord.errors.NotFound:
-                return ["It seems this message was deleted or never existed. Please try again or say `cancel` to cancel."]
+                return ["It seems this message was deleted or never existed. Please try again or say 'cancel' to cancel."]
 
-            reply = "I found this message:" + "```" + self.message.author.name + ": " + self.message.content + "```\n"
+            reply = "I found this message:" + "\"" + self.message.author.name + ": " + self.message.content + "\"\n"
             reply += "What would you like to report? Enter the number of the option you want to select.\n"
             reply += "1. Harassment\n"
             reply += "2. Spam\n"
@@ -114,7 +114,7 @@ class Report:
             else:
                 self.additional_info = message.content
                 
-            reply = "Is there any additional information you would like to provide? If not, say `no`."
+            reply = "Is there any additional information you would like to provide? If not, say 'no'."
             self.state = State.BLOCK
             return [reply]
         
