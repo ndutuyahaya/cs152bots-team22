@@ -59,44 +59,49 @@ class Report:
             except discord.errors.NotFound:
                 return ["It seems this message was deleted or never existed. Please try again or say 'cancel' to cancel."]
 
-            reply = "I found this message:" + "\"" + self.message.author.name + ": " + self.message.content + "\"\n"
+            reply = "I found this message: " + "\"" + self.message.author.name + ": " + self.message.content + "\"\n"
             reply += "What would you like to report? Enter the number of the option you want to select.\n"
             reply += "1. Harassment\n"
-            reply += "2. Spam\n"
-            reply += "3. Child safety concern\n"
-            reply += "4. Other\n"
+            reply += "2. Suicide or self-injury\n"
+            reply += "3. Violence or dangerous organizations\n"
+            reply += "4. Nudity or sexual activity\n"
+            reply += "5. Selling or promoting restricted items\n"
+            reply += "6. Scam or fraud\n"
+            reply += "7. Other\n"
             self.state = State.NARROWING_DOWN_GROOMING
             return [reply]
         
         if self.state == State.NARROWING_DOWN_GROOMING:
-            if "3" in message.content:
+            if "4" in message.content:
                 self.state = State.ADDITIONAL_INFO
-                reply = "What kind of child safety concern? Enter the number of the option you want to select.\n"
-                reply += "1. Suspected grooming\n"
-                reply += "2. Sharing inappropriate images\n"
-                reply += "3. Attempts to meet in person\n"
-                reply += "4. Other"
+                reply = "Which best describes this problem? Enter the number of the option you want to select.\n"
+                reply += "1. Threatening to share nude images\n"
+                reply += "2. Nudity or adult material\n"
+                reply += "3. Sexual exploitation\n"
+                reply += "4. Prostitution\n"
+                reply += "5. Involves someone under 18\n"
+                reply += "6. None of the above\n"
                 return [reply]
             else:
                 self.state = State.REPORT_COMPLETE
-                return ["We have not yet built support for options 1, 2, and 4."]
+                return ["We have not yet built support for options other than option 4."]
             
         if self.state == State.ADDITIONAL_INFO:
             # Storing the concern type
-            concern_types = ["Suspected grooming", "Sharing inappropriate images", "Attempts to meet in person", "Other"]
-            if message.content.isdigit() and 1 <= int(message.content) <= 4:
+            concern_types = ["Threatening to share nude images", "Nudity or adult material", "Sexual exploitation", "Prostitution", "Involves someone under 18", "None"]
+            if message.content.isdigit() and 1 <= int(message.content) <= 6:
                 self.concern_type = concern_types[int(message.content) - 1]
             else:
                 self.concern_type = "Unspecified"
                 
             self.state = State.POTENTIALLY_MORE_INFO
-            reply = "Can you tell us more about what happened? Enter the number of the option you want to select.\n"
+            reply = "Tell us more about what happened. Enter the number of the option you want to select.\n"
             reply += "1. They are impersonating someone else's identity.\n"
             reply += "2. They tried to isolate me from others.\n"
             reply += "3. They asked for private conversations off this app.\n"
             reply += "4. They pressured me for sensitive photos.\n"
             reply += "5. They tried to meet up in person.\n"
-            reply += "6. Other"
+            reply += "6. None of the above"
             return [reply]
         
         if self.state == State.POTENTIALLY_MORE_INFO:
@@ -107,14 +112,14 @@ class Report:
                 "Asked for private conversations off app",
                 "Pressured for sensitive photos",
                 "Tried to meet up in person",
-                "Other"
+                "None"
             ]
             if message.content.isdigit() and 1 <= int(message.content) <= 6:
                 self.additional_info = additional_info_options[int(message.content) - 1]
             else:
                 self.additional_info = message.content
                 
-            reply = "Is there any additional information you would like to provide? If not, say 'no'."
+            reply = "Enter any additional information you would like to provide. If you have nothing to add, say 'no'."
             self.state = State.BLOCK
             return [reply]
         
