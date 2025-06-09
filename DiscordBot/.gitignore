@@ -1,2 +1,4 @@
 tokens.json
 __pycache__
+user_stats.db
+backend/user_stats.db
