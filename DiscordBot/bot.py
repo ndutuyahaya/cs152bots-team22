@@ -38,7 +38,7 @@ with open(token_path) as f:
 class ModAction(Enum):
     REPORT_TO_LAW = auto()
     BAN_USER = auto()
-    DECREASE_SCORE = auto()
+    INCREASE_SCORE = auto()
     SUSPEND_ACCOUNT = auto()
     NO_ACTION = auto()
     SKIP = auto()
@@ -933,7 +933,7 @@ class ModBot(discord.Client):
         
         parts = content.split()
         if len(parts) < 2:
-            await channel.send("Please specify an action: `!action [ban|suspend|decrease|report|none|skip]`")
+            await channel.send("Please specify an action: `!action [ban|suspend|increase|report|none|skip]`")
             return
         
         action_type = parts[1].lower()
@@ -949,13 +949,13 @@ class ModBot(discord.Client):
                 await self.suspend_user(channel, report, days)
             except ValueError:
                 await channel.send("Invalid duration. Please use a number of days.")
-        elif action_type == "decrease":
+        elif action_type == "increase":
             if len(parts) < 3:
-                await channel.send("Please specify new score: `!action decrease [new_score]`")
+                await channel.send("Please specify new score: `!action increase [new_score]`")
                 return
             try:
                 new_score = int(parts[2])
-                await self.decrease_user_score(channel, report, new_score)
+                await self.increase_user_score(channel, report, new_score)
             except ValueError:
                 await channel.send("Invalid score. Please use a number.")
         elif action_type == "report":
@@ -967,7 +967,7 @@ class ModBot(discord.Client):
         elif action_type == "skip":
             await channel.send("Report skipped. Use `!next` to move to the next report.")
         else:
-            await channel.send("Unknown action type. Use `ban`, `suspend`, `decrease`, `report`, `none`, or `skip`.")
+            await channel.send("Unknown action type. Use `ban`, `suspend`, `increase`, `report`, `none`, or `skip`.")
 
     async def ban_user(self, channel, report):
         """Ban a user"""
@@ -1028,8 +1028,8 @@ class ModBot(discord.Client):
         except Exception as e:
             await channel.send(f"Error suspending user: {str(e)}")
 
-    async def decrease_user_score(self, channel, report, new_score):
-        """Decrease a user's trust score"""
+    async def increase_user_score(self, channel, report, new_score):
+        """Increase a user's risk score"""
         if new_score < 0 or new_score > 100:
             await channel.send("Score must be between 0 and 100.")
             return
@@ -1039,8 +1039,8 @@ class ModBot(discord.Client):
             self.risk_profiles.user_profiles[report.reported_user_id]['risk_score'] = 100 - new_score
         
         report.status = "completed"
-        report.mod_actions.append(ModAction.DECREASE_SCORE)
-        await channel.send(f"User's trust score has been updated to {new_score}.")
+        report.mod_actions.append(ModAction.INCREASE_SCORE)
+        await channel.send(f"User's risk score has been updated to {new_score}.")
 
     async def report_to_law(self, channel, report):
         """Simulate reporting to law enforcement"""
@@ -1077,7 +1077,7 @@ class ModBot(discord.Client):
         embed.add_field(name="!save", value="Save current user profiles to file", inline=False)
         embed.add_field(name="!action ban", value="Ban the reported user", inline=False)
         embed.add_field(name="!action suspend [days]", value="Suspend the user for specified days", inline=False)
-        embed.add_field(name="!action decrease [score]", value="Set a new trust score for the user", inline=False)
+        embed.add_field(name="!action increase [score]", value="Set a new risk score for the user", inline=False)
         embed.add_field(name="!action report", value="Report to law enforcement", inline=False)
         embed.add_field(name="!action none", value="Take no action and mark report as complete", inline=False)
         embed.add_field(name="!action skip", value="Skip this report for now", inline=False)

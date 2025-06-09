@@ -148,7 +148,7 @@ class Report:
                     "message": self.message,
                     "reason": "Child Safety Concern",
                     "details": f"Specific concern: {self.concern_type if self.concern_type else 'Unknown'}. Additional info: {self.additional_info if self.additional_info else 'None'}",
-                    "score": 30  # Starting score for child safety concerns is low
+                    "score": 50  # Starting score for child safety concerns is low
                 }
                 # Letting the client handle creating the report object
                 self.client.add_report_to_queue(report_data)
